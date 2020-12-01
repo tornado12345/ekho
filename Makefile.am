@@ -1,4 +1,4 @@
-AM_CXXFLAGS = -Wall -DEKHO_DATA_PATH='"$(datadir)/ekho-data"'
+AM_CXXFLAGS = -Wall -DEKHO_DATA_PATH='"$(datadir)/ekho-data"' -g
 CXXFLAGS += -O0
 
 FESTIVAL_H = @FESTIVAL_HEADER@
@@ -8,11 +8,11 @@ host_cpu=`uname -p`
 
 noinst_LIBRARIES = libekho.a
 noinst_HEADERS = src/stdafx.h 
-include_HEADERS = src/ekho.h src/ekho_dict.h src/character.h src/phonetic_symbol.h src/zhy_symbol_map.h src/zh_symbol_map.h src/ekho_typedef.h src/ekho_impl.h utfcpp/source/utf8.h
+include_HEADERS = src/ekho.h src/ekho_dict.h src/ssml.h src/audio.h src/character.h src/phonetic_symbol.h src/zhy_symbol_map.h src/zh_symbol_map.h src/ekho_typedef.h src/ekho_impl.h utfcpp/source/utf8.h
 
-libekho_a_SOURCES = src/libekho.cpp src/libekho_impl.cpp src/ekho_dict.cpp src/number.cpp src/musicxml.cpp src/zhy_symbol_map.cpp src/zh_symbol_map.cpp src/symbol_array.cpp sonic/sonic.c
+libekho_a_SOURCES = src/libekho.cpp src/libekho_impl.cpp src/ssml.cpp src/audio.cpp src/phonetic_symbol.cpp src/ekho_dict.cpp src/number.cpp src/musicxml.cpp src/zhy_symbol_map.cpp src/zh_symbol_map.cpp src/symbol_array.cpp sonic/sonic.c
 libekho_a_CXXFLAGS = -I$(srcdir)/utfcpp/source -I$(srcdir)/sonic @CFLAG_PULSEAUDIO@ @CFLAG_FESTIVAL@ -pthread @CFLAG_FRISO@ -std=c++11 -I$(srcdir)/libmusicxml/src/elements -I$(srcdir)/libmusicxml/src/lib -I$(srcdir)/libmusicxml/src/visitors -I$(srcdir)/libmusicxml/src/files -I$(srcdir)/libmusicxml/src/parser
-LIBEKHO_LIB = @LIB_PULSEAUDIO@ @LIB_FESTIVAL@ @LIB_MP3LAME@ -lsndfile -lespeak @LIB_FRISO@
+LIBEKHO_LIB = @LIB_PULSEAUDIO@ @LIB_FESTIVAL@ @LIB_MP3LAME@ -lsndfile -lespeak-ng @LIB_FRISO@
 
 if ENABLE_FRISO
 noinst_LIBRARIES += libfriso.a
@@ -37,6 +37,9 @@ DATA_SUB_DIRS = $(DATA_DIR)/alphabet $(DATA_DIR)/hakka $(DATA_DIR)/tibetan $(DAT
 COPYRIGHT_FILES = $(DATA_DIR)/COPYING-jyutping-wong $(DATA_DIR)/COPYING-pinyin-yali $(DATA_DIR)/COPYING-hakka-weicheng $(DATA_DIR)/COPYING-hangul-haesung $(DATA_DIR)/COPYING-ngangien-qianshan $(DATA_DIR)/COPYING-tibetan-trinley
 EXTRA_DIST = $(COPTRIGHT_FILES) # this line seems no longer work. don't know why
 
+$(srcdir)/libmusicxml/libmusicxml2.a:
+	cd $(srcdir)/libmusicxml/linux && make
+
 install-data-hook:
 	mkdir -p $(DESTDIR)$(datadir)/ekho-data
 if DIST_VOICE_DATA
@@ -48,7 +51,7 @@ endif
 uninstall-hook:
 	rm -rf $(DESTDIR)$(datadir)/ekho-data
 
-dist-hook:
+dist-hook: clean-hook
 	mkdir -p $(distdir)/ekho-data
 if DIST_VOICE_DATA
 	cp -RL $(DATA_SUB_DIRS) $(distdir)/ekho-data/
@@ -74,18 +77,17 @@ if ENABLE_SPEECHD
 	cd $(srcdir)/speechd-api && make clean
 endif
 
-all: all-local
+all: all-am speechd
 
-all-local:
-	cd $(srcdir)/libmusicxml/linux && make
+speechd:
 if ENABLE_SPEECHD
-	cd $(srcdir)/speechd-api && ./build.sh && ./configure --libdir=/usr && make
+	cd $(srcdir)/speechd-api && ./build.sh && ./configure --prefix=/usr && make
 endif
 
 if ENABLE_SPEECHD
 install: install-am
-	cp $(srcdir)/speechd-api/src/modules/.libs/sd_ekho /usr/lib/speech-dispatcher-modules/
+	cd $(srcdir)/speechd-api && make install
 	cp $(srcdir)/speechd-api/config/modules/ekho.conf /etc/speech-dispatcher/modules/
-	mkdir -p ~/.config/speech-dispatcher/modules/
-	cp $(srcdir)/speechd-api/config/modules/ekho.conf ~/.config/speech-dispatcher/modules/
+	mkdir -p /home/$(SUDO_USER)/.config/speech-dispatcher/modules/
+	cp $(srcdir)/speechd-api/config/modules/ekho.conf /home/$(SUDO_USER)/.config/speech-dispatcher/modules/
 endif

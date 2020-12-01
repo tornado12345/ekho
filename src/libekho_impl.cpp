@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <time.h>
@@ -35,6 +36,8 @@
 #include "ekho.h"
 #include "ekho_dict.h"
 #include "ekho_impl.h"
+#include "ssml.h"
+#include "audio.h"
 #include "sonic.h"
 #include "utf8.h"
 
@@ -55,7 +58,7 @@
 #endif
 
 #define ENABLE_ENGLISH
-#include "espeak/speak_lib.h"
+#include "espeak-ng/speak_lib.h"
 #ifdef ENABLE_FESTIVAL
 #include "festival/festival.h"
 #endif
@@ -68,18 +71,27 @@ using namespace std;
 #endif
 
 bool EkhoImpl::mDebug = false;
+SpeechdSynthCallback* EkhoImpl::speechdSynthCallback = 0;
 SynthCallback *gSynthCallback = 0;
 
 EkhoImpl::EkhoImpl() { this->init(); }
 
 int EkhoImpl::init(void) {
+  if (mDebug) {
+    cerr << "EkhoImpl::init" << endl;
+  }
+
   mIsMale = false;
   mPendingFrames = 0;
-  mStripSsml = true;
+  supportSsml = true;
   mSpeakIsolatedPunctuation = true;
   mSpeechQueueMutex = PTHREAD_MUTEX_INITIALIZER;
   mSpeechQueueCond = PTHREAD_COND_INITIALIZER;
   mEnglishVoice = "voice_kal_diphone";
+  mOverlap = 4096;
+
+  this->audio = new Audio();
+
   this->mSndFile = 0;
   this->isRecording = false;
   this->tempoDelta = 0;
@@ -125,6 +137,7 @@ EkhoImpl::~EkhoImpl(void) {
 
   if (this->isSpeechThreadInited) {
     void *ret;
+    pthread_attr_destroy(&this->speechThreadAttr);
     pthread_join(this->speechThread, &ret);
   }
   closeStream();
@@ -142,11 +155,18 @@ EkhoImpl::~EkhoImpl(void) {
 int EkhoImpl::initSound(void) {
   if (!this->isSoundInited) {
     // launch speechDaemon
+    pthread_attr_init(&this->speechThreadAttr);
+    pthread_attr_setdetachstate(&this->speechThreadAttr, PTHREAD_CREATE_JOINABLE);
     pthread_create(&this->speechThread, NULL, speechDaemon, (void *)this);
     this->isSpeechThreadInited = true;
+    this->isSoundInited = true;
+
+    // not output sound directly, only return pcm data if mSynthCallback is set.
+    if (speechdSynthCallback) {
+      return 0;
+    }
 
 #ifdef HAVE_PULSEAUDIO
-    this->isSoundInited = true;
     if (initStream() < 0) {
       cerr << "Fail to init audio stream." << endl;
       return -1;
@@ -212,6 +232,11 @@ int EkhoImpl::initStream(void) {
 
     this->stream = pa_simple_new(NULL, "Ekho", PA_STREAM_PLAYBACK, NULL,
                                  "playback", &ss, NULL, NULL, &error);
+    this->audio->pulseAudio = this->stream;
+    if (EkhoImpl::mDebug) {
+      cerr << "pulseAudio inited: audio=%p, pulseAudio=%p"
+        << this->audio << this->audio->pulseAudio << endl;
+    }
 
     if (!this->stream) {
       cerr << "pa_simple_new() failed: " << pa_strerror(error) << endl;
@@ -285,11 +310,12 @@ int EkhoImpl::initEnglish(void) {
   // cout << "samplerate: " << samplerate << endl;
   gEkho = this;
   espeak_SetSynthCallback(espeakSynthCallback);
+  /* 女声好像并不好听，还是用原声吧 
   if (!mIsMale) {
     espeak_SetVoiceByName("en+f4");
   } else {
     espeak_SetVoiceByName("en");
-  }
+  }*/
 #endif
   return 0;
 }
@@ -554,17 +580,21 @@ int EkhoImpl::saveMp3(string text, string filename) {
 
 int EkhoImpl::writePcm(short *pcm, int frames, void *arg, OverlapType type,
                        bool tofile) {
-  short buffer[BUFFER_SIZE];
+  short *buffer = new short[BUFFER_SIZE];
   int error;
 
   EkhoImpl *pEkho = (EkhoImpl *)arg;
-  if (!pEkho->mSonicStream) return -1;
+  if (!pEkho->mSonicStream) {
+    return -1;
+  }
 
   int flush_frames = pEkho->writeToSonicStream(pcm, frames, type);
 
   if (!flush_frames) {
     do {
+      // sonic会自动剪去一些空白的frame
       frames = sonicReadShortFromStream(pEkho->mSonicStream, buffer, BUFFER_SIZE);
+      //cerr << "sonicReadShortFromStream: " << frames << endl;
 
       if (frames > 0 && !pEkho->isStopped) {
         if (tofile) {
@@ -575,25 +605,36 @@ int EkhoImpl::writePcm(short *pcm, int frames, void *arg, OverlapType type,
             return -1;
           }
         } else {
+          if (EkhoImpl::speechdSynthCallback) {
+            if (EkhoImpl::mDebug) {
+              cerr << "EkhoImpl::speechdSynthCallback: " << frames << endl;
+            }
+            EkhoImpl::speechdSynthCallback(buffer, frames, 16, 1, pEkho->mDict.mSfinfo.samplerate, 0);
+          } else {
 #ifdef HAVE_PULSEAUDIO
-          int ret = pa_simple_write(pEkho->stream, buffer, frames * 2, &error);
-          if (ret < 0)
-            cerr << "pa_simple_write failed: " << pa_strerror(error) << endl;
+            int ret = pa_simple_write(pEkho->stream, buffer, frames * 2, &error);
+            if (ret < 0) {
+              cerr << "pa_simple_write failed: " << pa_strerror(error) << endl;
+            }
 #endif
+          }
         }
       }
     } while (frames > 0);
+  }
 
+  if (!frames) {
     sonicFlushStream(pEkho->mSonicStream);  // TODO: needed?
   }
 
+  delete[] buffer;
   return 0;
 }
 
 int EkhoImpl::writeToSonicStream(short *pcm, int frames, OverlapType type) {
   if (!mSonicStream) return 0;
 
-  const int quiet_level = 1638;  // 音量低于5%的部分重叠
+  const int quiet_level = mOverlap; // 音量低于(quiet_level / 65536)的部分重叠
 
   int flushframes = 0;  // mPendingFrames里应该输出的frames
   int cpframe =
@@ -602,6 +643,10 @@ int EkhoImpl::writeToSonicStream(short *pcm, int frames, OverlapType type) {
   int startframe = 0;
   int endframe = mPendingFrames - 1;
   int i = 0;
+  int q_level = 0;
+  // promise length not less than de5 * 0.8.
+  int minFrames = mDict.mSfinfo.frames * 0.8;
+  //cerr << "frames:" << frames << ",minFrames:" << minFrames << ",type:" << type << endl;
 
   switch (type) {
     case OVERLAP_NONE:
@@ -612,21 +657,102 @@ int EkhoImpl::writeToSonicStream(short *pcm, int frames, OverlapType type) {
       break;
 
     case OVERLAP_QUIET_PART:
+      // don't overlap more than 0.3(endframe)+0.3(startframe) of the syllable frames
+
       // find quiet frames
-      while (endframe > 0 && abs(mPendingPcm[endframe]) < quiet_level) {
+      while (endframe > 0 &&
+        mPendingFrames - endframe < frames * 0.3 &&
+        mPendingFrames - endframe < (frames - minFrames) * 0.5 &&
+        abs(mPendingPcm[endframe]) < quiet_level) {
         endframe--;
       }
 
-      while (startframe < frames && abs(pcm[startframe]) < quiet_level) {
+      while (startframe < frames * 0.3 &&
+          startframe < (frames - minFrames) * 0.5 &&
+          abs(pcm[startframe]) < quiet_level) {
         startframe++;
       }
 
+      // prevent valume over max
+      // search for a proper startframe position
+      i = endframe;
+      while (i > 0 && endframe - i < startframe &&
+          abs(mPendingPcm[i]) < 32767 - quiet_level) {
+        i--;
+      }
+
+      if (endframe - i < startframe) {
+        // remember a large frame and search back for small quite frame to overlarp
+        q_level = 32767 - abs(mPendingPcm[i]);
+        while (i > 0 && endframe - i < startframe &&
+            abs(pcm[endframe - i]) < q_level) {
+          i--;
+        }
+
+        if (endframe - i < startframe) {
+          //cerr << "startframe: " << startframe << " to " << endframe - i << endl;
+          startframe = endframe - i;
+        }
+      }
+
+      // search for a proper endframe position
+      i = startframe;
+      while (i < frames && i - startframe < mPendingFrames - endframe - 1 &&
+          abs(pcm[i]) < 32767 - quiet_level) {
+        i++;
+      }
+
+      if (i - startframe < mPendingFrames - endframe - 1) {
+        q_level = 32767 - abs(pcm[i]);
+        while (i < frames && i - startframe < mPendingFrames - endframe - 1 &&
+            abs(mPendingPcm[mPendingFrames + startframe - i - 1]) < q_level) {
+          i++;
+        }
+
+        if (i - startframe < mPendingFrames - endframe - 1) {
+          //cerr << "endframe: " << endframe << " to " << mPendingFrames + startframe - i - 1<< endl;
+          endframe = mPendingFrames + startframe - i - 1;
+        }
+      }
+
+/* old algarithm
       for (i = max(0, min(endframe, mPendingFrames - startframe));
-           i < mPendingFrames && cpframe < frames; i++) {
+          i < mPendingFrames && cpframe < frames; i++) {
         mPendingPcm[i] += pcm[cpframe];
         cpframe++;
+      }*/
+
+      for (i = max(0, endframe - startframe);
+          i < mPendingFrames && cpframe < frames; i++) {
+        mPendingPcm[i] += pcm[cpframe];
+        if (mPendingPcm[i] > 32000) {
+          //cerr << "overflow: " << mPendingPcm[i] << endl;
+        }
+        cpframe++;
       }
-      flushframes = i;
+
+      //cerr << "frames:" << frames << ", startframe: " << startframe <<
+      //  ", endframe:" << endframe << ", overlap: " << i - max(0, endframe - startframe) - 1 << endl;
+
+      if (frames == 0) {
+        // frames=0 means flush all pending frames
+        flushframes = i;
+      } else if (mPendingFrames + mPendingFrames > frames) {
+        // guaranteer pending frames no more than haft frames
+        flushframes = mPendingFrames - frames * 0.5;
+      }
+/*
+      if (endframe < mPendingFrames - 1) {
+        cerr << "clip endframe: " << mPendingFrames - endframe + 1 << endl;
+      }
+
+      if (startframe > 0) {
+        cerr << "clip startframe: " << startframe << endl;
+      }
+
+      cerr << "cpframes: " << cpframe << ", flushframes: " << flushframes 
+        << ", mPendingFrames: " << mPendingFrames << ", frames: " << frames << endl;
+*/
       break;
 
     case OVERLAP_HALF_PART:
@@ -659,10 +785,12 @@ int EkhoImpl::writeToSonicStream(short *pcm, int frames, OverlapType type) {
 
   sonicWriteShortToStream(mSonicStream, mPendingPcm, flushframes);
   mPendingFrames -= flushframes;
-  if (mPendingFrames > 0)
+  if (mPendingFrames > 0) {
     memcpy(mPendingPcm, mPendingPcm + flushframes, mPendingFrames * 2);
+  }
   memcpy(mPendingPcm + mPendingFrames, pcm + cpframe, (frames - cpframe) * 2);
   mPendingFrames += frames - cpframe;
+
 
   return flushframes;
 }
@@ -672,14 +800,21 @@ void EkhoImpl::finishWritePcm(void) {
 }
 
 void *EkhoImpl::speechDaemon(void *args) {
+  if (EkhoImpl::mDebug) {
+    cerr << "EkhoImpl::speechDaemon begin" << endl;
+  }
   EkhoImpl *pEkho = (EkhoImpl *)args;
 
   pEkho->initEnglish();
 
   while (1) {
     pthread_mutex_lock(&pEkho->mSpeechQueueMutex);
-    if (pEkho->mSpeechQueue.empty() && !pEkho->isEnded)
+    if (pEkho->mSpeechQueue.empty() && !pEkho->isEnded) {
+      if (EkhoImpl::mDebug) {
+        cerr << "EkhoImpl::speechDaemon waiting speech queue" << endl;
+      }
       pthread_cond_wait(&pEkho->mSpeechQueueCond, &pEkho->mSpeechQueueMutex);
+    }
 
     if (pEkho->isEnded) {
       pthread_mutex_unlock(&pEkho->mSpeechQueueMutex);
@@ -690,12 +825,9 @@ void *EkhoImpl::speechDaemon(void *args) {
       pthread_mutex_unlock(&pEkho->mSpeechQueueMutex);
       continue;
     }
+
     SpeechOrder order = pEkho->mSpeechQueue.front();
     pthread_mutex_unlock(&pEkho->mSpeechQueueMutex);
-
-    if (EkhoImpl::mDebug) {
-      cerr << "speaking '" << order.text << "'" << endl;
-    }
 
     // It seems that Sonic doesn't work on threads. Set arguments again. It's
     // fixed before. But it doesn't work again...
@@ -704,56 +836,54 @@ void *EkhoImpl::speechDaemon(void *args) {
     pEkho->setVolume(pEkho->volumeDelta);
     pEkho->setRate(pEkho->rateDelta);
 
+    if (EkhoImpl::mDebug) {
+      cerr << "EkhoImpl::speechDaemon synth2 " << order.text << endl;
+    }
     pEkho->synth2(order.text, speakPcm);
 
     // FIXME: following statement seems not flush rest PCM
     pEkho->speakPcm(0, 0, pEkho, OVERLAP_QUIET_PART);
+    if (EkhoImpl::speechdSynthCallback) {
+      EkhoImpl::speechdSynthCallback(0, 0, 0, 0, 0, 1);
+    }
+
+    if (EkhoImpl::mDebug) {
+      cerr << "EkhoImpl::speechDaemon synth2 end" << endl;
+    }
 
     int error;
 #ifdef HAVE_PULSEAUDIO
-    if (pEkho->isStopped)
-      pa_simple_flush(pEkho->stream, &error);
-    else
-      pa_simple_drain(pEkho->stream, &error);
+    if (!EkhoImpl::speechdSynthCallback) {
+      if (pEkho->isStopped) {
+        pa_simple_flush(pEkho->stream, &error);
+      } else {
+        pa_simple_drain(pEkho->stream, &error);
+      }
+    }
 #endif
 
-    if (pEkho->isStopped) continue;
-
-    if (order.pCallback) {
-      order.pCallback(order.pCallbackArgs);
-    }
-
     pthread_mutex_lock(&pEkho->mSpeechQueueMutex);
-    if ((!pEkho->isStopped) && (!pEkho->mSpeechQueue.empty()))
-      pEkho->mSpeechQueue.pop();
+    if (!pEkho->isStopped) {
+      if (order.pCallback) {
+        order.pCallback(order.pCallbackArgs);
+      }
+
+      if (!pEkho->mSpeechQueue.empty()) {
+        pEkho->mSpeechQueue.pop();
+      }
+    }
     pthread_mutex_unlock(&pEkho->mSpeechQueueMutex);
+  }
+
+  if (EkhoImpl::mDebug) {
+    cerr << "EkhoImpl::speechDaemon end" << endl;
   }
 
   return 0;
 }  // end of speechDaemon
 
-/**
- * Only strip one level SSML like <speak>...</speak>
- */
-static string stripSsml(string text) {
-  int first_lt = text.find_first_of('<');
-  if (first_lt == 0) {
-    int first_gt = text.find_first_of('>');
-    if (first_gt > 0) {
-      string tag = text.substr(first_lt + 1, first_gt - first_lt - 1);
-      string endtag("</");
-      endtag += tag + ">";
-      int last_endtag = text.find_last_of(endtag);
-      if (last_endtag == text.length() - 1)
-        return text.substr(first_gt + 1,
-                           last_endtag - first_gt - endtag.length());
-    }
-  }
-
-  return text;
-}
-
 // @TODO: remove this deprecared method
+/*
 int EkhoImpl::synth(string text, SynthCallback *callback, void *userdata) {
 #ifdef DEBUG_ANDROID
   LOGD("Ekho::synth(%s, %p, %p) voiceFileType=%s lang=%d", text.c_str(),
@@ -1006,7 +1136,7 @@ int EkhoImpl::synth(string text, SynthCallback *callback, void *userdata) {
   free(in_word_context);
 
   return 0;
-}
+}*/
 
 int EkhoImpl::play(string file) {
   system((this->player + " " + file + " 2>/dev/null").c_str());
@@ -1032,23 +1162,6 @@ const char *EkhoImpl::getPcmFromFestival(string text, int &size) {
 #endif
 
 #ifdef ENABLE_FESTIVAL
-  /*
-  // replace illegal char
-  replace(text.begin(), text.end(), '\\', ' ');
-
-  // trim spaces
-  while (text.size() > 0 && text[0] == ' ') {
-  text.erase(0, 1);
-  }
-  while (text.size() > 0 && text[text.size() - 1] == ' ') {
-  text.erase(text.size() - 1, 1);
-  }
-
-  if (text.empty()) {
-  return NULL;
-  }
-  */
-
   // set voice
   static const char *current_voice = "voice_kal_diphone";
   static int current_samplerate = 16000;
@@ -1108,6 +1221,7 @@ int EkhoImpl::setVoice(string voice) {
              voice.compare("cmn") == 0) {
     voice = "pinyin";
     mIsMale = false;
+    setSpeed(0);
     // setEnglishVoice("voice_cmu_us_slt_arctic_hts");
   } else if (voice.compare("Korean") == 0 || voice.compare("ko") == 0) {
     voice = "hangul";
@@ -1148,12 +1262,15 @@ int EkhoImpl::setVoice(string voice) {
   } else if (voice.find("English") == 0) {
     mDict.setLanguage(ENGLISH);
   } else {
-    cerr << "Invalid voice: " << voice << ". Fall back to Mandarin" << endl;
+    cerr << "Invalid voice: " << voice << ". Fallback to Mandarin." << endl;
     mDict.setLanguage(MANDARIN);
     voice = "pinyin";
   }
 
-  if (mDict.setVoice(voice.c_str()) != 0) return -2;
+  if (mDict.setVoice(voice.c_str()) != 0) {
+    cerr << "Fail to setVoice of dictionary" << endl;
+    return -2;
+  }
 
   this->initStream();
 
@@ -1164,6 +1281,10 @@ string EkhoImpl::getVoice(void) { return this->mDict.getVoice(); }
 
 int EkhoImpl::speak(string text, void (*pCallback)(void *),
                     void *pCallbackArgs) {
+  if (EkhoImpl::mDebug) {
+    cerr << "EkhoImpl::speak(" << text << ") begin" << endl;
+  }
+
   this->initSound();
   this->isPaused = false;
   // this->isStopped = false;
@@ -1176,6 +1297,10 @@ int EkhoImpl::speak(string text, void (*pCallback)(void *),
   pthread_cond_signal(&mSpeechQueueCond);
   pthread_mutex_unlock(&mSpeechQueueMutex);
 
+  if (EkhoImpl::mDebug) {
+    cerr << "EkhoImpl::speak end" << endl;
+  }
+
   return 0;
 }
 
@@ -1183,6 +1308,7 @@ int EkhoImpl::stopAndSpeak(string text, void (*pCallback)(void *),
                            void *pCallbackArgs) {
   this->stop();
   this->speak(text, pCallback, pCallbackArgs);
+  return 0;
 }
 
 int EkhoImpl::blockSpeak(string text) {
@@ -1234,11 +1360,20 @@ int EkhoImpl::stop(void) {
   this->isPaused = false;
   this->isStopped = true;
   this->mPendingFrames = 0;
+  if (EkhoImpl::mDebug) {
+    cerr << "EkhoImpl::stop " << " begin" << endl;
+  }
+
   pthread_mutex_lock(&mSpeechQueueMutex);
   while (not mSpeechQueue.empty()) {
     mSpeechQueue.pop();
   }
   pthread_mutex_unlock(&mSpeechQueueMutex);
+
+  if (EkhoImpl::mDebug) {
+    cerr << "EkhoImpl::stop " << " end" << endl;
+  }
+
   return 0;
 }
 
@@ -1252,14 +1387,30 @@ void EkhoImpl::setSpeed(int tempo_delta) {
   this->pSoundtouch.setTempoChange(this->tempoDelta);
 #else
   if (tempo_delta >= -50 && tempo_delta <= 300) {
-    if (mSonicStream)
-      sonicSetSpeed(mSonicStream, (float)(100 + tempo_delta) / 100);
+    if (mSonicStream) {
+      // nomralize voice's tempo
+      int baseDelta = 0;
+      if (mDict.getLanguage() == MANDARIN && mDict.mSfinfo.frames > 0) {
+        baseDelta = (int)round(mDict.mSfinfo.frames * 2 * 44100 / mDict.mSfinfo.samplerate / 20362 * 10) * 10 - 100;
+        //cerr << "frames=" << mDict.mSfinfo.frames << endl;
+      }
+
+      if (baseDelta + tempo_delta != 0 || tempo_delta != this->tempoDelta) {
+        if (mDict.mDebug) {
+          cerr << "tempo delta: " << baseDelta + tempo_delta << endl;
+        }
+
+        sonicSetSpeed(mSonicStream, (float)(100 + baseDelta + tempo_delta) / 100);
+      }
+    }
     this->tempoDelta = tempo_delta;
   }
 #endif
 }
 
-int EkhoImpl::getSpeed(void) { return this->tempoDelta; }
+int EkhoImpl::getSpeed(void) {
+  return this->tempoDelta + 30 /* 30 is for bd voice */; 
+}
 
 void EkhoImpl::setEnglishSpeed(int delta) {
   if (delta >= -50 && delta <= 150) {
@@ -1272,7 +1423,9 @@ void EkhoImpl::setEnglishSpeed(int delta) {
   }
 }
 
-int EkhoImpl::getEnglishSpeed(void) { return this->englishSpeedDelta; }
+int EkhoImpl::getEnglishSpeed(void) {
+  return this->englishSpeedDelta - 20 /* slower for bd voice */;
+}
 
 void EkhoImpl::setPitch(int pitch_delta) {
   if (EkhoImpl::mDebug) {
@@ -1598,52 +1751,6 @@ int EkhoImpl::request(string ip, int port, Command cmd, string text,
   return 0;
 }
 
-void EkhoImpl::filterSpaces(string &text) {
-  bool changed = false;
-
-  string text2;
-  bool in_chinese_context = true;
-
-  int c;
-  string::iterator it = text.begin();
-  string::iterator it2 = text.begin();
-  string::iterator end = text.end();
-
-  while (it != end) {
-    it2 = it;
-#ifdef DISABLE_EXCEPTIONS
-    c = utf8::next(it, end);
-#else
-    try {
-      c = utf8::next(it, end);
-    } catch (utf8::not_enough_room &) {
-      text = text2;
-      return;
-    } catch (utf8::invalid_utf8 &) {
-      cerr << "Invalid UTF8 encoding" << endl;
-      text = text2;
-      return;
-    }
-#endif
-
-    if (in_chinese_context && (c == 32 || c == 12288)) {
-      changed = true;
-    } else {
-      while (it2 != it) {
-        text2.push_back(*it2);
-        it2++;
-      }
-      in_chinese_context = (c > 128);
-    }
-
-    while (it2 != it) it2++;
-  }
-
-  if (changed) {
-    text = text2;
-  }
-}
-
 void EkhoImpl::translatePunctuations(string &text) {
   bool changed = false;
 
@@ -1692,6 +1799,10 @@ void EkhoImpl::translatePunctuations(string &text) {
 }
 
 void EkhoImpl::synthWithEspeak(string text) {
+  if (EkhoImpl::mDebug) {
+    cerr << "EkhoImpl::synthWithEspeak: " << text << endl;
+  }
+
   gSynthCallback(0, 0, gEkho, OVERLAP_NONE);  // flush pending pcm
   sonicSetRate(gEkho->mSonicStream, 22050.0 / mDict.mSfinfo.samplerate);
   espeak_Synth(text.c_str(), text.length() + 1, 0, POS_CHARACTER, 0,
@@ -1706,7 +1817,7 @@ int EkhoImpl::synth2(string text, SynthCallback *callback, void *userdata) {
        callback, userdata, mDict.mVoiceFileType, mDict.getLanguage());
 #endif
   if (EkhoImpl::mDebug) {
-    cerr << "speaking " << mDict.getLanguage() << ": '" << text << "'" << endl;
+    cerr << "speaking lang(" << mDict.getLanguage() << "): '" << text << "'" << endl;
   }
 
   if (!userdata) userdata = this;
@@ -1736,8 +1847,21 @@ int EkhoImpl::synth2(string text, SynthCallback *callback, void *userdata) {
     return -1;
   }
 
-  // filter SSML
-  if (mStripSsml) text = stripSsml(text);
+  // process SSML
+  if (mDebug) {
+    cerr << "supportSsml:" << this->supportSsml << endl;
+  }
+
+  if (this->supportSsml) {
+    if (Ssml::isAudio(text)) {
+      if (mDebug) {
+        cerr << "isAudio, play" << endl;
+      }
+      this->audio->play(Ssml::getAudioPath(text));
+      return 0;
+    }
+    text = Ssml::stripTags(text);
+  }
 
   // check punctuation
   if (mSpeakIsolatedPunctuation && text.length() <= 3) {
@@ -1751,7 +1875,10 @@ int EkhoImpl::synth2(string text, SynthCallback *callback, void *userdata) {
   if (mPuncMode == EKHO_PUNC_ALL) translatePunctuations(text);
 
   // filter spaces
-  filterSpaces(text);
+  Ssml::filterSpaces(text);
+  if (EkhoImpl::mDebug) {
+    cerr << "filterSpaces: " << text << endl;
+  }
 
 #ifdef DEBUG_ANDROID
   LOGD("Ekho::synth2 filtered text=%s", text.c_str());
@@ -1794,18 +1921,18 @@ int EkhoImpl::synth2(string text, SynthCallback *callback, void *userdata) {
           char c;
           if ((word->text.length() == 1) &&
               (c = tolower(word->text.c_str()[0])) && c >= 'a' && c <= 'z') {
-		  /*
-            if (!mAlphabetPcmCache[c - 'a'])
-              mAlphabetPcmCache[c - 'a'] =
-                  getEnglishPcm(word->text, mAlphabetPcmSize[c - 'a']);
+      		  /*
+                  if (!mAlphabetPcmCache[c - 'a'])
+                    mAlphabetPcmCache[c - 'a'] =
+                        getEnglishPcm(word->text, mAlphabetPcmSize[c - 'a']);
 
-            pPcm = mAlphabetPcmCache[c - 'a'];
-            size = mAlphabetPcmSize[c - 'a'];
-	    */
+                  pPcm = mAlphabetPcmCache[c - 'a'];
+                  size = mAlphabetPcmSize[c - 'a'];
+      	    */
 
             // use pinyin-huang alphabet
-	    phon_symbol = word->symbols.begin();
-	    pPcm = (*phon_symbol)->getPcm(mDict.mVoiceFile, size);
+      	    phon_symbol = word->symbols.begin();
+      	    pPcm = (*phon_symbol)->getPcm(mDict.mVoiceFile, size);
             callback((short *)pPcm, size / 2, userdata, OVERLAP_NONE);
           } else {
             pPcm = this->getEnglishPcm(word->text, size);
@@ -1846,8 +1973,10 @@ int EkhoImpl::synth2(string text, SynthCallback *callback, void *userdata) {
               Language lang = mDict.getLanguage();
               if (lang == MANDARIN || lang == CANTONESE) {
                 pPcm = (*symbol)->getPcm(mDict.mVoiceFile, size);
-                if (pPcm && size > 0)
+                if (pPcm && size > 0) {
+                  //cerr << (*symbol)->symbol << ": " << size << endl;
                   callback((short *)pPcm, size / 2, userdata, *type);
+                }
               } else {
                 string path = mDict.mDataPath + "/" + mDict.getVoice();
                 pPcm =
@@ -1884,3 +2013,7 @@ int EkhoImpl::synth2(string text, SynthCallback *callback, void *userdata) {
   return 0;
 }
 
+void EkhoImpl::setSpeechdSynthCallback(SpeechdSynthCallback *callback) {
+  EkhoImpl::speechdSynthCallback = callback;
+  this->audio->speechdSynthCallback = callback;
+}

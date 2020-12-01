@@ -50,6 +50,8 @@ using namespace std;
 
 namespace ekho {
 
+typedef int (t_ekho_sync_callback)(short*, int);
+
 class EkhoImpl;
 
 class Ekho {
@@ -57,10 +59,11 @@ class Ekho {
   EkhoImpl *m_pImpl;
 
  public:
-  const static int BUFFER_SIZE = 8192;
-  const static int PENDING_PCM_FRAMES = 4096;
+  const static int BUFFER_SIZE = 40960;
+  const static int PENDING_PCM_FRAMES = 20480;
   const static int MAX_CLIENTS = 100;
 
+  static bool mDebug;
   static void debug(bool flag = true);
 
   Ekho();
@@ -87,6 +90,10 @@ class Ekho {
   int speak(string text, void (*pCallback)(void *) = NULL,
             void *pCallbackArgs = NULL);
 
+  typedef int(SynthCallback)(short *pcm, int frames, void *arg = NULL,
+                             OverlapType type = OVERLAP_QUIET_PART);
+  int synth(const char *text, SpeechdSynthCallback *callback);
+
   void sing(string filepath);
 
   /* Clear speech queue before speak text
@@ -96,12 +103,10 @@ class Ekho {
   int stopAndSpeak(string text, void (*pCallback)(void *) = NULL,
                    void *pCallbackArgs = NULL);
 
-  typedef int(SynthCallback)(short *pcm, int frames, void *arg,
-                             OverlapType type);
   /* Synth speech
    * callback will be called time from time when buffer is ready
    */
-  int synth(string text, SynthCallback *callback, void *userdata = 0);
+  //int synth(string text, SynthCallback *callback, void *userdata = 0);
   int synth2(string text, SynthCallback *callback, void *userdata = 0);
 
   /* no pause is allowed
@@ -137,13 +142,15 @@ class Ekho {
   int request(string ip, int port, Command cmd, string text, string outfile);
 
   /**
-   * Set whether strip SSML tags in text
+   * Set whether support SSML tags in text
    */
-  void setStripSsml(bool b = true);
-  bool getStripSsml();
+  void enableSsml(); // default
+  void disableSsml();
 
   void setSpeakIsolatedPunctuation(bool b = true);
   bool getSpeakIsolatedPunctuation();
+
+  void setOverlap(int overlap);
 
   /* Set tempo delta
    * Parameter:
@@ -215,6 +222,8 @@ class Ekho {
      */
 
   void setPunctuationMode(EkhoPuncType mode);
+  void setCapLetterRecognMode(EkhoCapLetterRecognType mode);
+  int getSampleRate();
 };
 }
 

@@ -29,7 +29,8 @@
 #include "config.h"
 #include "ekho_dict.h"
 #include "ekho_typedef.h"
-#include "espeak/speak_lib.h"
+#include "audio.h"
+#include "espeak-ng/speak_lib.h"
 #include "sonic.h"
 
 #ifdef HAVE_PULSEAUDIO
@@ -66,9 +67,15 @@ class EkhoImpl {
   const static int MAX_CLIENTS = 100;
   Dict mDict;
   int mPort;
-  bool mStripSsml;
+  bool supportSsml;
   bool mSpeakIsolatedPunctuation;
   bool mIsMale;
+  int mOverlap;
+
+  static SpeechdSynthCallback *speechdSynthCallback;
+  void setSpeechdSynthCallback(SpeechdSynthCallback *callback);
+
+  static bool mDebug;
 #ifdef ANDROID
   cst_voice *mFliteVoice;
 #endif
@@ -114,7 +121,7 @@ class EkhoImpl {
   /* Synth speech
    * callback will be called time from time when buffer is ready
    */
-  int synth(string text, SynthCallback *callback, void *userdata = 0);
+  //int synth(string text, SynthCallback *callback, void *userdata = 0);
   int synth2(string text, SynthCallback *callback, void *userdata = 0);
 
   /* no pause is allowed
@@ -148,12 +155,6 @@ class EkhoImpl {
 
   /* request wave from Ekho TTS server */
   int request(string ip, int port, Command cmd, string text, string outfile);
-
-  /**
-   * Set whether strip SSML tags in text
-   */
-  inline void setStripSsml(bool b = true) { mStripSsml = b; }
-  inline bool getStripSsml(void) { return mStripSsml; }
 
   inline void setSpeakIsolatedPunctuation(bool b = true) {
     mSpeakIsolatedPunctuation = b;
@@ -260,7 +261,6 @@ class EkhoImpl {
   void closeStream(void);
   int outputSpeech(string text);
 
-  static bool mDebug;
   bool mPcmCache;
   int tempoDelta;             // -50 .. 100 (%)
   int englishSpeedDelta;      // -50 .. 150 (%)
@@ -286,9 +286,12 @@ class EkhoImpl {
 
   bool isSpeechThreadInited;
   pthread_t speechThread;
+  pthread_attr_t speechThreadAttr;
+
 #ifdef HAVE_PULSEAUDIO
   pa_simple *stream;
 #endif
+  Audio *audio;
 
   const char *mAlphabetPcmCache[26];
   int mAlphabetPcmSize[26];

@@ -22,7 +22,7 @@ sub kill_speechd() {
 
 sub build_common() {
   system('sudo apt-get -y install libsndfile1-dev');
-  system('sudo apt-get -y install libespeak-dev');
+  system('sudo apt-get -y install libespeak-ng-dev');
   system('sudo apt-get -y install libpulse-dev');
   system('sudo apt-get -y install libncurses5-dev');
   system('sudo apt-get -y install build-essential');
@@ -31,6 +31,8 @@ sub build_common() {
   system('sudo apt-get -y install libmp3lame-dev');
 #  system('sudo apt-get -y install festival-dev');
   system('sudo apt-get -y install libestools2.1-dev');
+  system('sudo apt-get -y install gettext');
+  system('sudo apt-get -y install texinfo');
 #  system('./configure --enable-festival --enable-speechd');
   system('./configure --enable-speechd');
   system('make clean && make');
@@ -43,10 +45,10 @@ sub setup_common() {
   `sudo mv /tmp/speechd.conf.ekho /etc/speech-dispatcher/speechd.conf`;
 
   my $config = '/usr/lib/python3/dist-packages/speechd_config/config.py';
-  if (-e '/usr/share/pyshared/speechd_config/config.py') {
+  #if (-e '/usr/share/pyshared/speechd_config/config.py') {
     # older than 14.04
-    $config = '/usr/share/pyshared/speechd_config/config.py';
-  }
+  #  $config = '/usr/share/pyshared/speechd_config/config.py';
+  #}
 
   if (-e $config) {
     `sudo cp $config $config.$t`;
@@ -87,38 +89,25 @@ if ($lang ne 'Tibetan' and $lang ne 'Mandarin' and $lang ne 'Cantonese') {
   $lang = 'Mandarin';
 }
 
-if (`grep precise /etc/lsb-release`) {
-  # ubuntu 12.04
+my $version = `grep DISTRIB_RELEASE /etc/lsb-release`;
+if ($version =~ /(\d+\.\d+)/ && $1 >= 20.04) {
   build_common() if (not $skip_build);
-  setup_common();
-  system('sudo ln -f -s /usr/lib/speech-dispatcher/libsdaudio.so.2 /usr/lib/libsdaudio.so.2');
-  kill_speechd();
-  system('sudo rm -rf /usr/local/share/ekho-data');
-  system('sudo make install');
-  setup_lang();
-} elsif (`grep "12.10" /etc/lsb-release` ||
-    `grep "13.04" /etc/lsb-release` ||
-    `grep "14.04" /etc/lsb-release` ||
-    `grep "15.10" /etc/lsb-release` ||
-    `grep "16.04" /etc/lsb-release` ||
-    `grep "18.04" /etc/lsb-release`) {
-  # ubuntu 12.10
-  build_common() if (not $skip_build);
-  `sudo ln -s /usr/lib/i386-linux-gnu/speech-dispatcher-modules /usr/lib/` if (not `grep "14.04" /etc/lsb-release`);
-  if (! -e '/usr/lib/libsdaudio.so.2') {
-    `sudo cp speechd-api/src/audio/.libs/libsdaudio.so* /usr/lib/`;
-  }
+  #`sudo ln -s /usr/lib/i386-linux-gnu/speech-dispatcher-modules /usr/lib/` if (not `grep "14.04" /etc/lsb-release`);
+  #if (! -e '/usr/lib/libsdaudio.so.2') {
+  #  `sudo cp speechd-api/src/audio/.libs/libsdaudio.so* /usr/lib/`;
+  #}
   setup_common();
   kill_speechd();
   system('sudo rm -rf /usr/local/share/ekho-data');
   system('sudo make install');
   setup_lang();
-  `sudo rm -f /usr/lib/speech-dispatcher-modules/sd_cicero`;
+  #`sudo rm -f /usr/lib/speech-dispatcher-modules/sd_cicero`;
 } else {
   print "Sorry. Your OS is not supported. Please refer to INSTALL. You can also send email to Cameron <hgneng at gmail.com> for help.\n";
 }
 
 # start/restart Orca
 print "restarting Orca\n";
-`ps -ef | grep speech-dispatcher | grep -v grep | awk '{print $2}' | xargs kill`;
+`killall speech-dispatcher`;
+`sleep 3`;
 system("orca --replace &");

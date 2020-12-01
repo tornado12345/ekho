@@ -1,5 +1,5 @@
 ﻿/***************************************************************************
- * Copyright (C) 2008-2013 by Cameron Wong                                 *
+ * Copyright (C) 2008-2019 by Cameron Wong                                 *
  * name in passport: HUANG GUANNENG                                        *
  * email: hgneng at gmail.com                                              *
  * website: http://www.eguidedog.net                                       *
@@ -35,10 +35,12 @@
 #include <io.h>
 #include <process.h>
 #define F_OK 0
+#include <direct.h>
+#define GetCurrentDir _getcwd
 #else
 #include <unistd.h>
+#define GetCurrentDir getcwd
 #endif
-
 using namespace std;
 
 //#define DEBUG_PERF
@@ -58,6 +60,7 @@ static bool isDir(const char *path) {
   }
 }
 
+Dict *Dict::me = 0;
 bool Dict::mDebug = false;
 
 Dict::Dict(void) { init(); }
@@ -68,6 +71,7 @@ Dict::Dict(Language lang) {
 }
 
 void Dict::init(void) {
+  me = this;
   mLanguage = ENGLISH;
 
   mVoiceFile = 0;
@@ -121,8 +125,27 @@ Dict::~Dict(void) {
   delete mQuaterPause;
   if (mVoiceFile) fclose(mVoiceFile);
   mVoiceFile = 0;
-
+  Dict::me = 0;
   // TODO: detete mKaSymbolLetter
+
+  for (list<PhoneticSymbol *>::iterator li = mSpecialSymbols.begin();
+       li != mSpecialSymbols.end(); li++) {
+    delete *li;
+  }
+  mSpecialSymbols.clear();
+
+  for (list<char *>::iterator li = mSpecialChars.begin();
+       li != mSpecialChars.end(); li++) {
+    delete[] *li;
+  }
+  mSpecialChars.clear();
+}
+
+std::string GetCurrentWorkingDir( void ) {
+  char buff[FILENAME_MAX];
+  GetCurrentDir( buff, FILENAME_MAX );
+  std::string current_working_dir(buff);
+  return current_working_dir;
 }
 
 /**
@@ -155,6 +178,7 @@ string Dict::getDefaultDataPath(void) {
   }
 
   if (mDebug) {
+    cerr << "current dir: " << GetCurrentWorkingDir() << endl;
     cerr << "EKHO_DATA_PATH: " << path << endl;
   }
 
@@ -288,11 +312,16 @@ int Dict::setLanguage(Language lang) {
 
 void Dict::addSpecialSymbols(void) {
   // add alphabets
-  char cs[3] = {'\\', 0, 0};
   string voicePath = mDataPath + "/alphabet";
+
   for (char c = 'a'; c <= 'z'; c++) {
+    char *cs = new char[3];
+    cs[0] = '\\';
     cs[1] = c;
+    cs[2] = 0;
     PhoneticSymbol *ps = new PhoneticSymbol(cs);
+    mSpecialSymbols.push_back(ps);
+    mSpecialChars.push_back(cs);
     int size = 0;
     const char *pcm = ps->getPcm(voicePath.c_str(), "wav", size);
     addDictItem(c, ps);
@@ -334,6 +363,8 @@ void Dict::addSpecialSymbols(void) {
   mPunctuationNameMap[12290] = "句号";
   addDictItem(63, mFullPause);  // ?
   mPunctuationNameMap[63] = "问号";
+  addDictItem(65311, mFullPause);  // Chinese ?
+  mPunctuationNameMap[65311] = "问号";
 
   // "." "..."
   addDictItem(46, mFullPause);  // "."
@@ -359,6 +390,8 @@ void Dict::addSpecialSymbols(void) {
   mPunctuationNameMap[8230] = "省略号";
 
   // quater pauses
+  addDictItem(12289, mQuaterPause);
+  mPunctuationNameMap[12289] = "顿号";
   addDictItem(45, mQuaterPause);  // "-"
   mPunctuationNameMap[45] = "减号";
   addDictItem(8212, mQuaterPause);  // Chinese "-"
@@ -519,7 +552,7 @@ int Dict::setVoice(string voice) {
 
     return 0;
   } else {
-    cerr << "Fail to find voice data directory: " << voice << endl;
+    cerr << "Fail to find voice data directory: " << path << endl;
     return -1;
   }
 }
@@ -542,6 +575,8 @@ list<OverlapType> Dict::lookupOverlap(list<Character> &charList) {
   list<Character>::iterator cItor = charList.begin();
   list<Character>::iterator end = charList.end();
   while (cItor != end) {
+    ret.push_back(OVERLAP_QUIET_PART);
+    /*
     string s = cItor->getUtf8();
     if (  // 助词、量词等
         s == "的" || s == "得" || s == "着" || s == "所" || s == "了" ||
@@ -557,7 +592,7 @@ list<OverlapType> Dict::lookupOverlap(list<Character> &charList) {
       ret.push_back(OVERLAP_HALF_PART);
     } else {
       ret.push_back(OVERLAP_QUIET_PART);
-    }
+    }*/
 
     cItor++;
   }
@@ -702,6 +737,8 @@ PhoneticSymbol *Dict::getPhoneticSymbol(string &symbol) {
   } else if (mLanguage == CANTONESE) {
     sym_code = ZHY_PHash::in_word_set(symbol.c_str(), symbol.size());
   }
+
+  //cerr << "getPhoneticSymbol:" << sym_code << endl;
 
   if (sym_code)
     return &mSymbolArray[sym_code->code];
@@ -980,10 +1017,19 @@ void Dict::getWordPcm(list<PhoneticSymbol *> &word_phon, unsigned int &offset,
        itor != word_phon.end(); itor++) {
     symbols += (*itor)->symbol;
     i++;
-    if (i < len) symbols += "-";
+    if (i < len) symbols += "-"; // 多字录音的文件名以-分隔拼音
   }
 
   map<string, PhoneticSymbol>::iterator sym = mWordSymbolMap.find(symbols);
+
+  // 如果文件没有找到，尝试读其它声调的文件顶替
+  /*
+  for (char c = '1'; sym == mWordSymbolMap.end() && c <= '7'; c++) {
+    string s = symbols.substr(0, symbols.length() - 1) + c;
+    cerr << "try " << s << endl;
+    sym = mWordSymbolMap.find(symbols);
+  }*/
+
   if (sym != mWordSymbolMap.end()) {
     offset = sym->second.offset;
     bytes = sym->second.bytes;
@@ -1653,10 +1699,12 @@ void Dict::saveEkhoVoiceFile() {
         FILE *gsmfile = fopen(path.c_str(), "r");
 
         int bytes = 0;
+        int b = 0;
         do {
-          bytes = fread(buffer, 1, 128000, gsmfile);
-          fwrite(buffer, 1, bytes, file);
-        } while (bytes == 128000);
+          b = fread(buffer, 1, 128000, gsmfile);
+          bytes += b;
+          fwrite(buffer, 1, b, file);
+        } while (b == 128000);
 
 	/*
 	fseek(gsmfile, 0L, SEEK_END);
@@ -1675,8 +1723,13 @@ void Dict::saveEkhoVoiceFile() {
 
         os.put(bytes & 0xFF);
         os.put((bytes >> 8) & 0xFF);
+        os.put((bytes >> 16) & 0xFF);
+
+        //cerr << "code:" << code << ", offset=" << total_bytes <<
+        // ", bytes=" << bytes << endl;
       } else {
         // multiple symbols (word)
+        cerr << "found word:" << symbol << endl;
         list<string> symbols;
         string symbol0 = symbol;
         int pos = 0;
@@ -1701,10 +1754,12 @@ void Dict::saveEkhoVoiceFile() {
         FILE *gsmfile = fopen(path.c_str(), "r");
 
         int bytes = 0;
+        int b = 0;
         do {
-          bytes = fread(buffer, 1, 512000, gsmfile);
-          fwrite(buffer, 1, bytes, file);
-        } while (bytes == 512000);
+          b = fread(buffer, 1, 512000, gsmfile);
+          bytes += b;
+          fwrite(buffer, 1, b, file);
+        } while (b == 512000);
 
         fclose(gsmfile);
 
@@ -1716,6 +1771,7 @@ void Dict::saveEkhoVoiceFile() {
 
         os.put(bytes & 0xFF);
         os.put((bytes >> 8) & 0xFF);
+        os.put((bytes >> 16) & 0xFF);
       }
     }
   } while (dp != NULL);
@@ -1735,7 +1791,7 @@ void Dict::loadEkhoVoiceFile(string path) {
   unsigned char lowbyte;
   unsigned short code;
   unsigned int offset;
-  unsigned short bytes;
+  int bytes;
   unsigned int tmpint;
 
   string index_file = path + ".index";
@@ -1777,11 +1833,14 @@ void Dict::loadEkhoVoiceFile(string path) {
       offset += (tmpint << 24);
 
       // bytes
-      lowbyte = (unsigned char)is.get();
       bytes = (unsigned char)is.get();
-      bytes = (bytes << 8) + lowbyte;
+      tmpint = (unsigned char)is.get();
+      bytes += (tmpint << 8);
+      tmpint = (unsigned char)is.get();
+      bytes += (tmpint << 16);
 
-      // audio file size should less than 65535, pinyin-huang-44100 will overflow here
+      //cerr << code << ":" << offset << "," << bytes << endl;
+
       mSymbolArray[code].offset = offset;
       mSymbolArray[code].bytes = bytes;
     } else {
@@ -1792,9 +1851,12 @@ void Dict::loadEkhoVoiceFile(string path) {
         lowbyte = (unsigned char)is.get();
         code = (unsigned char)is.get();
         code = (code << 8) + lowbyte;
-        mSymbolArray[code].symbol;
+        //mSymbolArray[code].symbol;
+        //cerr << mSymbolArray[code].symbol << endl;
         strcat(symbols, mSymbolArray[code].symbol);
-        if (i < code_count - 1) strcat(symbols, "-");
+        if (i < code_count - 1) {
+          strcat(symbols, "-");
+        }
       }
 
       // offset
@@ -1807,9 +1869,13 @@ void Dict::loadEkhoVoiceFile(string path) {
       offset += (tmpint << 24);
 
       // bytes
-      lowbyte = (unsigned char)is.get();
       bytes = (unsigned char)is.get();
-      bytes = (bytes << 8) + lowbyte;
+      tmpint = (unsigned char)is.get();
+      bytes += (tmpint << 8);
+      tmpint = (unsigned char)is.get();
+      bytes += (tmpint << 16);
+
+      //cerr << symbols << offset << bytes << endl;
 
       mWordSymbolMap[symbols] = PhoneticSymbol(symbols, offset, bytes);
     }
@@ -1817,16 +1883,42 @@ void Dict::loadEkhoVoiceFile(string path) {
 
   is.close();
 
-  if (mVoiceFile)
+  if (mVoiceFile) {
     fclose(mVoiceFile);
+  }
 
   memset(&mSfinfo, 0, sizeof(mSfinfo));
   mSfinfo.samplerate = samplerate;
   mSfinfo.channels = 1;
-  if (strcmp(mVoiceFileType, "gsm"))
+  if (strcmp(mVoiceFileType, "gsm")) {
     mSfinfo.format = SF_FORMAT_WAV | SF_FORMAT_GSM610;
+  }
   //mVoiceFile = sf_open(voice_file.c_str(), SFM_READ, &mSfinfo);
   mVoiceFile = fopen(voice_file.c_str(), "r");
+
+  SymbolCode *sym_code;
+  if (mLanguage == MANDARIN) {
+    sym_code = ZH_PHash::in_word_set("de5", 3);
+    int size = 0;
+    mSymbolArray[sym_code->code].getPcm(mVoiceFile, size);
+    mSfinfo.frames = size / 2;
+  } else {
+    mSfinfo.frames = 0;
+  }
+
+  if (mDebug) {
+    cerr << "sampleRate=" << samplerate << ", fileType=" << mVoiceFileType << endl;
+  }
+}
+
+PhoneticSymbol* Dict::getPhoneticSymbol(char *symbol) {
+  if (Dict::me) {
+    string s(symbol);
+    unsigned short code = Dict::me->getCodeOfSymbol(s);
+    return &Dict::me->mSymbolArray[code];
+  }
+
+  return 0;
 }
 
 }

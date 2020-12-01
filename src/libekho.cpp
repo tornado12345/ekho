@@ -1,5 +1,5 @@
 /***************************************************************************
- * Copyright (C) 2008-2013 by Cameron Wong                                 *
+ * Copyright (C) 2008-2020 by Cameron Wong                                 *
  * name in passport: HUANG GUANNENG                                        *
  * email: hgneng at gmail.com                                              *
  * website: http://www.eguidedog.net                                       *
@@ -38,6 +38,7 @@
 #include "ekho_typedef.h"
 #include "sonic.h"
 #include "utf8.h"
+#include "espeak-ng/speak_lib.h"
 
 #ifdef ENABLE_WIN32
 #include <windows.h>
@@ -62,11 +63,20 @@ using namespace std;
 #include <lame/lame.h>
 #endif
 
-void Ekho::debug(bool flag) { EkhoImpl::debug(flag); }
+bool Ekho::mDebug = false;
 
-Ekho::Ekho() { this->m_pImpl = new EkhoImpl(); }
+void Ekho::debug(bool flag) {
+  Ekho::mDebug = flag;
+  EkhoImpl::debug(flag);
+}
 
-Ekho::Ekho(string voice) { this->m_pImpl = new EkhoImpl(voice); }
+Ekho::Ekho() {
+  this->m_pImpl = new EkhoImpl();
+}
+
+Ekho::Ekho(string voice) {
+  this->m_pImpl = new EkhoImpl(voice);
+}
 
 Ekho::~Ekho(void) { delete this->m_pImpl; }
 
@@ -115,9 +125,10 @@ int Ekho::writePcm(short *pcm, int frames, void *arg, OverlapType type) {
 void *Ekho::speechDaemon(void *args) { return EkhoImpl::speechDaemon(args); }
 
 // @TODO: remove this deprecared method
+/*
 int Ekho::synth(string text, SynthCallback *callback, void *userdata) {
   return this->m_pImpl->synth(text, callback, userdata);
-}
+}*/
 
 int Ekho::play(string file) { return this->m_pImpl->play(file); }
 
@@ -142,9 +153,13 @@ int Ekho::resume() { return this->m_pImpl->resume(); }
 
 int Ekho::stop() { return this->m_pImpl->stop(); }
 
-void Ekho::setStripSsml(bool b) { this->m_pImpl->setStripSsml(b); }
+void Ekho::enableSsml() {
+  this->m_pImpl->supportSsml = true;
+}
 
-bool Ekho::getStripSsml() { return this->m_pImpl->getStripSsml(); }
+void Ekho::disableSsml() {
+  this->m_pImpl->supportSsml = false;
+}
 
 void Ekho::setSpeakIsolatedPunctuation(bool b) {
   this->m_pImpl->setSpeakIsolatedPunctuation(b);
@@ -159,6 +174,10 @@ void Ekho::setSpeed(int tempo_delta) {
 }
 
 int Ekho::getSpeed() { return this->m_pImpl->getSpeed(); }
+
+void Ekho::setOverlap(int overlap) {
+  this->m_pImpl->mOverlap = overlap;
+}
 
 void Ekho::setEnglishSpeed(int delta) {
   return this->m_pImpl->setEnglishSpeed(delta);
@@ -197,3 +216,31 @@ void Ekho::setPunctuationMode(EkhoPuncType mode) {
 }
 
 void Ekho::sing(string filepath) { this->m_pImpl->sing(filepath); }
+
+int Ekho::synth(const char *text, SpeechdSynthCallback *callback) {
+  this->m_pImpl->setSpeechdSynthCallback(callback);
+  this->m_pImpl->speak(text);
+  return 0;
+}
+
+int Ekho::getSampleRate() {
+  return this->m_pImpl->mDict.mSfinfo.samplerate;
+}
+
+void Ekho::setCapLetterRecognMode(EkhoCapLetterRecognType mode) {
+  int espeak_cap_mode = 0;
+  switch (mode) {
+  case EKHO_CAP_NONE:
+    espeak_cap_mode = 800;
+    break;
+  case EKHO_CAP_SPELL:
+    espeak_cap_mode = 2;
+    break;
+  case EKHO_CAP_ICON:
+    espeak_cap_mode = 1;
+    break;
+  }
+
+  espeak_ERROR ret =
+      espeak_SetParameter(espeakCAPITALS, espeak_cap_mode, 1);
+}

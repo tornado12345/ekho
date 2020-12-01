@@ -126,6 +126,7 @@ class Dict {
   Dict(Language lang);
   ~Dict(void);
 
+  static Dict *me;
   const static int SYMBOL_ARRAY_SIZE = 8000;
   static bool mDebug;
   string mDataPath;
@@ -230,6 +231,8 @@ class Dict {
 
   // for style of [[pin1 yin1]]
   PhoneticSymbol *getPhoneticSymbol(string &symbol);
+  static PhoneticSymbol* getPhoneticSymbol(char *symbol);
+  unsigned short getCodeOfSymbol(string &symbol);
 
  private:
   /**
@@ -238,6 +241,8 @@ class Dict {
   DictItem mDictItemArray[65536];
   map<int, DictItem> mExtraDictItemMap;
   map<int, const char *> mPunctuationNameMap;
+  list<PhoneticSymbol *> mSpecialSymbols; // for delete when destroy
+  list<char *> mSpecialChars; // for delete when destroy
 
   string mVoice;
   int mFullPausePcmSize;
@@ -276,7 +281,6 @@ class Dict {
   void replaceNumbers(list<Character> &charList,
                       list<Character> &convertedCharList);
 
-  unsigned short getCodeOfSymbol(string &symbol);
   void saveEkhoVoiceFile();
   void loadEkhoVoiceFile(string path);
 };
